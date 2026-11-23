@@ -1,0 +1,143 @@
+// Skema Prisma untuk Mudiak (Pemesanan Tiket Bus Sumatera Barat)
+// Menggunakan SQLite untuk pengembangan & demo lokal.
+// Model disiapkan agar kompatibel untuk migrasi ke PostgreSQL/Neon nantinya.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Peran pengguna: ADMIN, OPERATOR, PENUMPANG
+// Status operator: PENDING (belum diverifikasi), ACTIVE, BLOCKED
+model User {
+  id        Int       @id @default(autoincrement())
+  nama      String
+  email     String    @unique
+  password  String
+  noHp      String
+  role      String    @default("PENUMPANG") // ADMIN | OPERATOR | PENUMPANG
+  status    String    @default("ACTIVE")    // ACTIVE | PENDING | BLOCKED
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // Relasi: Operator memiliki banyak armada bus
+  buses     Bus[]
+  // Relasi: Penumpang memiliki banyak pesanan
+  pesanan   Pesanan[]
+}
+
+// Master Kota di Sumatera Barat (dikelola oleh Admin)
+model Kota {
+  id        Int      @id @default(autoincrement())
+  nama      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ruteAsal   Rute[] @relation("RuteAsal")
+  ruteTujuan Rute[] @relation("RuteTujuan")
+}
+
+// Rute perjalanan menghubungkan kota asal dan kota tujuan
+model Rute {
+  id         Int      @id @default(autoincrement())
+  asalId     Int
+  tujuanId   Int
+  jarakKm    Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  asal       Kota     @relation("RuteAsal", fields: [asalId], references: [id], onDelete: Cascade)
+  tujuan     Kota     @relation("RuteTujuan", fields: [tujuanId], references: [id], onDelete: Cascade)
+  jadwal     Jadwal[]
+
+  @@unique([asalId, tujuanId])
+}
+
+// Armada Bus milik Operator
+model Bus {
+  id         Int      @id @default(autoincrement())
+  operatorId Int
+  nama       String
+  platNomor  String   @unique
+  kapasitas  Int      // Jumlah total kursi (16, 17, 18, dst.)
+  kursiDepan Int      @default(2) // Jumlah kursi di samping supir (2 atau 3)
+  kelas      String   @default("Ekonomi") // Ekonomi | Bisnis | Eksekutif
+  supir      String?  // Nama sopir : Andi, Edo, dll
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  operator   User     @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  jadwal     Jadwal[]
+}
+
+// Jadwal keberangkatan bus untuk rute dan tanggal/jam tertentu
+model Jadwal {
+  id            Int      @id @default(autoincrement())
+  busId         Int
+  ruteId        Int
+  tanggal       String   // Format YYYY-MM-DD
+  jamBerangkat  String   // Format HH:mm
+  harga         Int      // Harga tiket (flat per jadwal)
+  status        String   @default("AKTIF") // AKTIF | SELESAI | BATAL
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  bus           Bus      @relation(fields: [busId], references: [id], onDelete: Cascade)
+  rute          Rute     @relation(fields: [ruteId], references: [id], onDelete: Cascade)
+  kursiList     Kursi[]
+  pesananList   Pesanan[]
+
+  // Aturan anti-bentrok: satu bus tidak boleh memiliki jadwal ganda pada tanggal dan jam sama
+  @@unique([busId, tanggal, jamBerangkat])
+}
+
+// Kursi individual yang di-generate otomatis saat jadwal dibuat
+model Kursi {
+  id          Int      @id @default(autoincrement())
+  jadwalId    Int
+  nomorKursi  String   // Misal: "1", "2", "3", dst.
+  status      String   @default("TERSEDIA") // TERSEDIA | DIPESAN
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  jadwal      Jadwal   @relation(fields: [jadwalId], references: [id], onDelete: Cascade)
+  tiket       Tiket?
+
+  @@unique([jadwalId, nomorKursi])
+}
+
+// Pesanan dibuat oleh Penumpang (dapat memuat banyak tiket sekaligus)
+model Pesanan {
+  id             Int      @id @default(autoincrement())
+  kodeBooking    String   @unique
+  penumpangId    Int
+  jadwalId       Int
+  namaKontak     String
+  noHpKontak     String
+  totalHarga     Int
+  status         String   @default("CONFIRMED") // CONFIRMED | BATAL
+  statusBayar    String   @default("SUDAH_BAYAR") // Persiapan integrasi gateway nantinya
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  penumpang      User     @relation(fields: [penumpangId], references: [id], onDelete: Cascade)
+  jadwal         Jadwal   @relation(fields: [jadwalId], references: [id], onDelete: Cascade)
+  tiketList      Tiket[]
+}
+
+// Tiket individual untuk satu kursi dalam suatu pesanan
+model Tiket {
+  id          Int      @id @default(autoincrement())
+  pesananId   Int
+  kursiId     Int      @unique
+  statusBarang String  @default("BELUM_BOARDING") // BELUM_BOARDING | BOARDING
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  pesanan     Pesanan  @relation(fields: [pesananId], references: [id], onDelete: Cascade)
+  kursi       Kursi    @relation(fields: [kursiId], references: [id], onDelete: Cascade)
+}
