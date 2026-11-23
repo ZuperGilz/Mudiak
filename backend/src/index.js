@@ -20,35 +20,30 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/kota', kotaRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/bus', busRoutes);
-app.use('/api/jadwal', jadwalRoutes);
-app.use('/api/pesanan', pesananRoutes);
-app.use('/api/laporan', laporanRoutes);
-
-/**
- * Endpoint uji coba otorisasi peran
- */
-app.get('/api/admin/check', authenticate, authorize('ADMIN'), (req, res) => {
-  res.json({ message: 'Akses khusus Admin terverifikasi', user: req.user });
-});
-
-app.get('/api/operator/check', authenticate, authorize('OPERATOR'), (req, res) => {
-  res.json({ message: 'Akses khusus Operator terverifikasi', user: req.user });
-});
-
-app.get('/api/penumpang/check', authenticate, authorize('PENUMPANG'), (req, res) => {
-  res.json({ message: 'Akses khusus Penumpang terverifikasi', user: req.user });
+// Root & Health Check Endpoint
+app.get(['/', '/api'], (req, res) => {
+  res.json({
+    name: 'Mudiak Backend API',
+    status: 'online',
+    version: '1.0.0',
+    description: 'API resmi platform tiket travel Mudiak & PO AYAH (Minangkabau)',
+    health: '/health',
+    endpoints: {
+      auth: '/api/auth',
+      bus: '/api/bus',
+      kota: '/api/kota',
+      jadwal: '/api/jadwal',
+      pesanan: '/api/pesanan',
+      laporan: '/api/laporan',
+    },
+  });
 });
 
 /**
  * Endpoint Health Check
  * Mengembalikan status server serta verifikasi koneksi database dengan menghitung total kota & user.
  */
-app.get('/health', async (req, res) => {
+app.get(['/health', '/api/health'], async (req, res) => {
   try {
     const totalUser = await prisma.user.count();
     const totalKota = await prisma.kota.count();
@@ -68,10 +63,48 @@ app.get('/health', async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       status: 'error',
-      message: 'Gagal terhubung ke database',
+      message: 'Gagal terhubung ke database Neon',
       error: error.message,
     });
   }
+});
+
+// Daftarkan Routes (didukung dengan prefix /api maupun langsung agar fleksibel terhadap konfigurasi Vercel)
+const registerRoutes = (prefix = '') => {
+  app.use(`${prefix}/auth`, authRoutes);
+  app.use(`${prefix}/kota`, kotaRoutes);
+  app.use(`${prefix}/users`, userRoutes);
+  app.use(`${prefix}/bus`, busRoutes);
+  app.use(`${prefix}/jadwal`, jadwalRoutes);
+  app.use(`${prefix}/pesanan`, pesananRoutes);
+  app.use(`${prefix}/laporan`, laporanRoutes);
+};
+
+registerRoutes('/api');
+registerRoutes('');
+
+/**
+ * Endpoint uji coba otorisasi peran
+ */
+app.get(['/api/admin/check', '/admin/check'], authenticate, authorize('ADMIN'), (req, res) => {
+  res.json({ message: 'Akses khusus Admin terverifikasi', user: req.user });
+});
+
+app.get(['/api/operator/check', '/operator/check'], authenticate, authorize('OPERATOR'), (req, res) => {
+  res.json({ message: 'Akses khusus Operator terverifikasi', user: req.user });
+});
+
+app.get(['/api/penumpang/check', '/penumpang/check'], authenticate, authorize('PENUMPANG'), (req, res) => {
+  res.json({ message: 'Akses khusus Penumpang terverifikasi', user: req.user });
+});
+
+// 404 Fallback Handler dalam format JSON
+app.use((req, res) => {
+  res.status(404).json({
+    status: 'error',
+    message: `Rute '${req.method} ${req.originalUrl}' tidak ditemukan di server Mudiak API.`,
+    availableRoutes: ['/', '/health', '/api/kota', '/api/jadwal', '/api/bus', '/api/pesanan', '/api/auth'],
+  });
 });
 
 // Jalankan server jika dijalankan langsung (bukan di lingkungan serverless Vercel atau unit test)
