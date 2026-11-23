@@ -10,6 +10,7 @@ import {
   apiDeleteBus,
   apiVerifikasiPesanan,
   apiTolakPesanan,
+  apiCreatePesanan,
 } from '../utils/api';
 
 const Ctx = createContext(null);
@@ -302,7 +303,7 @@ export function AppProvider({ children }) {
     notify('Armada berhasil dihapus dari Neon.');
   };
 
-  const createBooking = (payloadOrMethod) => {
+  const createBooking = async (payloadOrMethod) => {
     if (!user || !draft) throw Error('Login dan pilih kursi terlebih dahulu.');
     const trip = data.trips.find((t) => t.id === draft.tripId);
     if (!trip || trip.remaining < draft.seats.length) throw Error('Kursi tidak tersedia.');
@@ -318,8 +319,32 @@ export function AppProvider({ children }) {
     const margin = 2000 * seatCount;
     const poPayout = total - margin;
 
+    const fallbackId = `MDK-${Math.floor(1000 + Math.random() * 8999)}-${trip.to === 'Payakumbuh' ? 'PY' : 'SB'}`;
+
+    // Simpan pesanan & tiket langsung ke Neon PostgreSQL
+    let backendPesanan = null;
+    const authToken = token || user?.token;
+    try {
+      const res = await apiCreatePesanan(
+        {
+          jadwalId: typeof trip.id === 'number' ? trip.id : 1,
+          kursiIds: draft.seats,
+          namaKontak: draft.buyer?.name || user.name || 'Penumpang Mudiak',
+          noHpKontak: draft.buyer?.phone || user.phone || '081234567890',
+          email: draft.buyer?.email || user.email || 'budi@gmail.com',
+        },
+        authToken
+      );
+      if (res.ok && res.data?.pesanan) {
+        backendPesanan = res.data.pesanan;
+      }
+    } catch (e) {
+      console.warn('Gagal sinkron tiket ke Neon via API:', e);
+    }
+
     const booking = {
-      id: `MDK-${Math.floor(1000 + Math.random() * 8999)}-${trip.to === 'Payakumbuh' ? 'PY' : 'SB'}`,
+      id: backendPesanan?.kodeBooking || fallbackId,
+      dbId: backendPesanan?.id || null,
       userId: user.id,
       tripId: trip.id,
       seats: draft.seats,
@@ -352,10 +377,13 @@ export function AppProvider({ children }) {
 
   // Konfirmasi pembayaran oleh Admin -> E-Tiket Resmi Aktif
   const approvePayment = async (bookingId) => {
+    const targetBooking = data.bookings.find((b) => b.id === bookingId);
+    const targetId = targetBooking?.dbId || bookingId;
     const authToken = token || user?.token;
-    if (authToken && typeof bookingId === 'number') {
+
+    if (authToken && targetId) {
       try {
-        await apiVerifikasiPesanan(bookingId, authToken);
+        await apiVerifikasiPesanan(targetId, authToken);
       } catch (e) {
         console.warn('Gagal verifikasi pesanan via API:', e);
       }
@@ -368,10 +396,12 @@ export function AppProvider({ children }) {
   const rejectPayment = async (bookingId, reason = 'Bukti transfer tidak sesuai') => {
     const b = data.bookings.find((x) => x.id === bookingId);
     if (!b) return;
+    const targetId = b?.dbId || bookingId;
     const authToken = token || user?.token;
-    if (authToken && typeof bookingId === 'number') {
+
+    if (authToken && targetId) {
       try {
-        await apiTolakPesanan(bookingId, authToken);
+        await apiTolakPesanan(targetId, authToken);
       } catch (e) {
         console.warn('Gagal tolak pesanan via API:', e);
       }

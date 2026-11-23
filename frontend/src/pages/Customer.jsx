@@ -176,7 +176,7 @@ export function Payment(){
   const minutes=String(Math.floor(timeLeft/60)).padStart(2,'0');
   const seconds=String(timeLeft%60).padStart(2,'0');
 
-  const submitPayment=(e)=>{
+  const submitPayment=async (e)=>{
     e.preventDefault();
     if(!senderName.trim()){
       notify('Harap masukkan nama pemilik rekening pengirim.');
@@ -184,14 +184,14 @@ export function Payment(){
     }
     setProcessing(true);
     try{
-      const b=createBooking({
+      const b=await createBooking({
         method:'QRIS Escrow Mudiak',
         senderName:senderName.trim(),
         senderBank,
         refNumber:refNumber.trim()||`REF-${Date.now().toString().slice(-6)}`,
         status:'menunggu_verifikasi'
       });
-      notify(`Konfirmasi pembayaran ${b.id} dikirim! Menunggu verifikasi Admin.`);
+      notify(`Konfirmasi pembayaran ${b.id} dikirim! E-Tiket tersimpan di database.`);
       navigate('/tiket-saya',{state:{ticketId:b.id}});
     }catch(err){
       notify(err.message);

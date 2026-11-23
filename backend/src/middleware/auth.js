@@ -48,3 +48,31 @@ export function authorize(...allowedRoles) {
     next();
   };
 }
+
+/**
+ * Middleware autentikasi opsional:
+ * Jika Bearer token valid disediakan, user akan disimpan di `req.user`.
+ * Jika tidak ada token atau token guest, request tetap dilanjutkan tanpa melempar 401.
+ */
+export async function optionalAuthenticate(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return next();
+  }
+
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: { id: true, nama: true, email: true, noHp: true, role: true, status: true },
+    });
+
+    if (user && user.status !== 'BLOCKED') {
+      req.user = user;
+    }
+  } catch (err) {
+    // Abaikan error parsing token pada optional authenticate
+  }
+  next();
+}

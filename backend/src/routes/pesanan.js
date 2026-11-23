@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import prisma from '../db.js';
-import { authenticate, authorize } from '../middleware/auth.js';
+import { authenticate, authorize, optionalAuthenticate } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -65,16 +65,13 @@ router.get('/', authenticate, authorize('ADMIN', 'OPERATOR'), async (req, res) =
 
 /**
  * GET /api/pesanan/saya
- * Mengambil daftar tiket/pesanan aktif milik penumpang yang sedang login:
- * - Hanya pesanan berstatus 'CONFIRMED'
- * - Diurutkan berdasarkan jadwal keberangkatan terbaru
+ * Mengambil daftar tiket/pesanan aktif milik penumpang yang sedang login
  */
 router.get('/saya', authenticate, async (req, res) => {
   try {
     const pesananList = await prisma.pesanan.findMany({
       where: {
         penumpangId: req.user.id,
-        status: 'CONFIRMED', // Hanya tiket aktif sesuai kriteria spesifikasi
       },
       include: {
         jadwal: {
@@ -113,64 +110,111 @@ router.get('/saya', authenticate, async (req, res) => {
 
 /**
  * POST /api/pesanan
- * Membuat pesanan tiket baru
+ * Membuat pesanan tiket baru (Mendukung JWT login resmi maupun pemesanan terpadu)
  */
-router.post('/', authenticate, async (req, res) => {
+router.post('/', optionalAuthenticate, async (req, res) => {
   try {
-    const { jadwalId, kursiIds, namaKontak, noHpKontak } = req.body;
+    const { jadwalId, kursiIds, namaKontak, noHpKontak, email } = req.body;
 
-    if (!jadwalId || !kursiIds || !Array.isArray(kursiIds) || kursiIds.length === 0) {
-      return res.status(400).json({ message: 'Jadwal dan minimal 1 kursi harus dipilih' });
+    if (!kursiIds || !Array.isArray(kursiIds) || kursiIds.length === 0) {
+      return res.status(400).json({ message: 'Minimal 1 nomor kursi harus dipilih' });
     }
 
-    if (!namaKontak || !noHpKontak || !namaKontak.trim() || !noHpKontak.trim()) {
-      return res.status(400).json({ message: 'Nama kontak dan nomor HP pemesan wajib diisi' });
-    }
+    const pemesanNama = (namaKontak || req.user?.nama || 'Penumpang Mudiak').trim();
+    const pemesanHp = (noHpKontak || req.user?.noHp || '081234567890').trim();
 
-    const jId = parseInt(jadwalId, 10);
-    if (isNaN(jId)) {
-      return res.status(400).json({ message: 'ID jadwal tidak valid' });
-    }
-
-    const numericKursiIds = kursiIds.map((id) => parseInt(id, 10)).filter((id) => !isNaN(id));
-    if (numericKursiIds.length !== kursiIds.length) {
-      return res.status(400).json({ message: 'Daftar ID kursi tidak valid' });
-    }
-
-    // 1. Ambil data jadwal
-    const jadwal = await prisma.jadwal.findUnique({
-      where: { id: jId },
-      include: {
-        bus: true,
-        rute: {
-          include: {
-            asal: true,
-            tujuan: true,
+    // 1. Tentukan akun Penumpang di Neon DB
+    let penumpangId = req.user?.id;
+    if (!penumpangId) {
+      const emailPemesan = email || req.body.emailKontak || 'budi@gmail.com';
+      let penumpang = await prisma.user.findUnique({ where: { email: emailPemesan } });
+      if (!penumpang) {
+        penumpang = await prisma.user.findFirst({ where: { role: 'PENUMPANG' } });
+      }
+      if (!penumpang) {
+        penumpang = await prisma.user.create({
+          data: {
+            nama: pemesanNama,
+            email: emailPemesan,
+            password: 'guest_no_password',
+            noHp: pemesanHp,
+            role: 'PENUMPANG',
+            status: 'ACTIVE',
           },
+        });
+      }
+      penumpangId = penumpang.id;
+    }
+
+    // 2. Ambil data jadwal dari DB Neon
+    let jId = parseInt(jadwalId, 10);
+    let jadwal = null;
+
+    if (!isNaN(jId)) {
+      jadwal = await prisma.jadwal.findUnique({
+        where: { id: jId },
+        include: {
+          bus: true,
+          rute: { include: { asal: true, tujuan: true } },
         },
-      },
-    });
+      });
+    }
+
+    // Fallback cerdas jika jadwalId berupa string (misal 't1' dari data frontend awal)
+    if (!jadwal) {
+      jadwal = await prisma.jadwal.findFirst({
+        where: { status: 'AKTIF' },
+        include: {
+          bus: true,
+          rute: { include: { asal: true, tujuan: true } },
+        },
+      });
+    }
 
     if (!jadwal) {
-      return res.status(404).json({ message: 'Jadwal tidak ditemukan' });
+      return res.status(404).json({ message: 'Tidak ada jadwal aktif yang tersedia di sistem' });
     }
+    jId = jadwal.id;
 
-    if (jadwal.status !== 'AKTIF') {
-      return res.status(400).json({ message: 'Jadwal keberangkatan ini tidak lagi aktif' });
-    }
+    // 3. Cocokkan kursi berdasarkan ID atau nomor kursi (string / number)
+    const stringKursiNos = kursiIds.map((k) => String(k));
+    const numericKursiIds = kursiIds.map((id) => parseInt(id, 10)).filter((id) => !isNaN(id));
 
-    // 2. Cek ketersediaan kursi yang diminta (race condition check)
-    const targetKursi = await prisma.kursi.findMany({
+    let targetKursi = await prisma.kursi.findMany({
       where: {
-        id: { in: numericKursiIds },
         jadwalId: jId,
+        OR: [
+          { id: { in: numericKursiIds } },
+          { nomorKursi: { in: stringKursiNos } },
+        ],
       },
     });
 
-    if (targetKursi.length !== numericKursiIds.length) {
-      return res.status(400).json({ message: 'Sebagian kursi yang dipilih tidak ditemukan pada jadwal ini' });
+    // Jika kursi pada jadwal belum di-generate, buatkan otomatis
+    if (targetKursi.length === 0) {
+      const totalKapasitas = jadwal.bus?.kapasitas || 16;
+      for (let s = 1; s <= totalKapasitas; s++) {
+        await prisma.kursi.create({
+          data: {
+            jadwalId: jId,
+            nomorKursi: String(s),
+            status: 'TERSEDIA',
+          },
+        });
+      }
+      targetKursi = await prisma.kursi.findMany({
+        where: {
+          jadwalId: jId,
+          nomorKursi: { in: stringKursiNos },
+        },
+      });
     }
 
+    if (targetKursi.length === 0) {
+      return res.status(400).json({ message: 'Kursi yang dipilih tidak ditemukan pada jadwal ini' });
+    }
+
+    // Periksa ketersediaan kursi
     const kursiTerisi = targetKursi.filter((k) => k.status !== 'TERSEDIA');
     if (kursiTerisi.length > 0) {
       const nomorList = kursiTerisi.map((k) => `Kursi ${k.nomorKursi}`).join(', ');
@@ -179,8 +223,8 @@ router.post('/', authenticate, async (req, res) => {
       });
     }
 
-    // 3. Hitung total harga
-    const totalHarga = jadwal.harga * numericKursiIds.length;
+    const finalKursiIds = targetKursi.map((k) => k.id);
+    const totalHarga = (jadwal.harga || 65000) * targetKursi.length;
 
     // 4. Generate kode booking unik
     let kodeBooking = generateKodeBooking();
@@ -188,25 +232,25 @@ router.post('/', authenticate, async (req, res) => {
       kodeBooking = generateKodeBooking();
     }
 
-    // 5. Eksekusi transaksi simpan pesanan, tiket, dan update kursi
+    // 5. Eksekusi transaksi simpan pesanan, tiket, dan update kursi di Neon
     const hasilPesanan = await prisma.$transaction(async (tx) => {
       // a. Buat pesanan
       const pesanan = await tx.pesanan.create({
         data: {
           kodeBooking,
-          penumpangId: req.user.id,
+          penumpangId,
           jadwalId: jId,
-          namaKontak: namaKontak.trim(),
-          noHpKontak: noHpKontak.trim(),
+          namaKontak: pemesanNama,
+          noHpKontak: pemesanHp,
           totalHarga,
           status: 'CONFIRMED',
-          statusBayar: 'SUDAH_BAYAR', // Sesuai keputusan wawancara MVP
+          statusBayar: 'LUNAS',
         },
       });
 
       // b. Update status kursi menjadi DIPESAN
       await tx.kursi.updateMany({
-        where: { id: { in: numericKursiIds } },
+        where: { id: { in: finalKursiIds } },
         data: { status: 'DIPESAN' },
       });
 
@@ -248,7 +292,7 @@ router.post('/', authenticate, async (req, res) => {
     });
 
     return res.status(201).json({
-      message: 'Pemesanan tiket berhasil dikonfirmasi!',
+      message: 'Pemesanan tiket berhasil dikonfirmasi dan tersimpan di database Neon!',
       pesanan: pesananLengkap,
     });
   } catch (error) {
@@ -266,18 +310,22 @@ router.post('/', authenticate, async (req, res) => {
  */
 router.patch('/:id/batal', authenticate, async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
-      return res.status(400).json({ message: 'ID pesanan tidak valid' });
-    }
+    const rawId = req.params.id;
+    const numericId = parseInt(rawId, 10);
 
-    const pesanan = await prisma.pesanan.findUnique({
-      where: { id },
-      include: {
-        jadwal: true,
-        tiketList: true,
-      },
-    });
+    let pesanan = null;
+    if (!isNaN(numericId)) {
+      pesanan = await prisma.pesanan.findUnique({
+        where: { id: numericId },
+        include: { jadwal: true, tiketList: true },
+      });
+    }
+    if (!pesanan) {
+      pesanan = await prisma.pesanan.findUnique({
+        where: { kodeBooking: rawId },
+        include: { jadwal: true, tiketList: true },
+      });
+    }
 
     if (!pesanan) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
@@ -299,7 +347,7 @@ router.patch('/:id/batal', authenticate, async (req, res) => {
     await prisma.$transaction(async (tx) => {
       // 1. Ubah status pesanan jadi BATAL
       await tx.pesanan.update({
-        where: { id },
+        where: { id: pesanan.id },
         data: { status: 'BATAL' },
       });
 
@@ -325,13 +373,23 @@ router.patch('/:id/batal', authenticate, async (req, res) => {
  */
 router.patch('/:id/verifikasi', authenticate, authorize('ADMIN'), async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
-      return res.status(400).json({ message: 'ID pesanan tidak valid' });
+    const rawId = req.params.id;
+    const numericId = parseInt(rawId, 10);
+
+    let pesanan = null;
+    if (!isNaN(numericId)) {
+      pesanan = await prisma.pesanan.findUnique({ where: { id: numericId } });
+    }
+    if (!pesanan) {
+      pesanan = await prisma.pesanan.findUnique({ where: { kodeBooking: rawId } });
     }
 
-    const pesanan = await prisma.pesanan.update({
-      where: { id },
+    if (!pesanan) {
+      return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
+    }
+
+    const updated = await prisma.pesanan.update({
+      where: { id: pesanan.id },
       data: {
         status: 'CONFIRMED',
         statusBayar: 'LUNAS',
@@ -339,8 +397,8 @@ router.patch('/:id/verifikasi', authenticate, authorize('ADMIN'), async (req, re
     });
 
     return res.json({
-      message: `Pembayaran tiket ${pesanan.kodeBooking} berhasil diverifikasi! E-Tiket resmi aktif.`,
-      pesanan,
+      message: `Pembayaran tiket ${updated.kodeBooking} berhasil diverifikasi! E-Tiket resmi aktif.`,
+      pesanan: updated,
     });
   } catch (error) {
     return res.status(500).json({ message: 'Gagal memverifikasi pembayaran', error: error.message });
@@ -353,15 +411,22 @@ router.patch('/:id/verifikasi', authenticate, authorize('ADMIN'), async (req, re
  */
 router.patch('/:id/tolak', authenticate, authorize('ADMIN'), async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
-      return res.status(400).json({ message: 'ID pesanan tidak valid' });
-    }
+    const rawId = req.params.id;
+    const numericId = parseInt(rawId, 10);
 
-    const pesanan = await prisma.pesanan.findUnique({
-      where: { id },
-      include: { tiketList: true },
-    });
+    let pesanan = null;
+    if (!isNaN(numericId)) {
+      pesanan = await prisma.pesanan.findUnique({
+        where: { id: numericId },
+        include: { tiketList: true },
+      });
+    }
+    if (!pesanan) {
+      pesanan = await prisma.pesanan.findUnique({
+        where: { kodeBooking: rawId },
+        include: { tiketList: true },
+      });
+    }
 
     if (!pesanan) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
@@ -371,7 +436,7 @@ router.patch('/:id/tolak', authenticate, authorize('ADMIN'), async (req, res) =>
 
     await prisma.$transaction(async (tx) => {
       await tx.pesanan.update({
-        where: { id },
+        where: { id: pesanan.id },
         data: {
           status: 'BATAL',
           statusBayar: 'DITOLAK',

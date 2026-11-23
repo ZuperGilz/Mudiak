@@ -150,30 +150,53 @@ async function main() {
   }
   console.log(`Berhasil men-seed ${createdBuses.length} armada travel PO AYAH beserta supir.`);
 
-  // 5. Seed Contoh Jadwal & Kursi Otomatis
-  const bus1 = createdBuses[0]; // BA 7041 AB (16 kursi)
-  const jadwal1 = await prisma.jadwal.create({
-    data: {
-      busId: bus1.id,
-      ruteId: rutePadangBukittinggi.id,
-      tanggal: '2026-11-25',
-      jamBerangkat: '08:00',
-      harga: 65000,
-      status: 'AKTIF',
-    },
-  });
+  // 5. Seed Jadwal & Kursi Otomatis di Beberapa Rute & Tanggal Populer
+  const daftarJadwal = [
+    // Padang -> Bukittinggi
+    { bus: createdBuses[0], rute: rutePadangBukittinggi, tanggal: '2026-11-16', jam: '08:00', harga: 65000 },
+    { bus: createdBuses[1], rute: rutePadangBukittinggi, tanggal: '2026-11-16', jam: '09:30', harga: 65000 },
+    { bus: createdBuses[3], rute: rutePadangBukittinggi, tanggal: '2026-11-16', jam: '11:00', harga: 75000 },
+    { bus: createdBuses[0], rute: rutePadangBukittinggi, tanggal: '2026-11-23', jam: '08:00', harga: 65000 },
+    { bus: createdBuses[1], rute: rutePadangBukittinggi, tanggal: '2026-11-23', jam: '10:00', harga: 65000 },
+    { bus: createdBuses[0], rute: rutePadangBukittinggi, tanggal: '2026-11-25', jam: '08:00', harga: 65000 },
+    { bus: createdBuses[1], rute: rutePadangBukittinggi, tanggal: '2026-11-25', jam: '13:30', harga: 65000 },
 
-  // Generate kursi 1 s/d kapasitas
-  for (let s = 1; s <= bus1.kapasitas; s++) {
-    await prisma.kursi.create({
+    // Padang -> Payakumbuh
+    { bus: createdBuses[2], rute: rutePadangPayakumbuh, tanggal: '2026-11-16', jam: '08:00', harga: 70000 },
+    { bus: createdBuses[2], rute: rutePadangPayakumbuh, tanggal: '2026-11-23', jam: '08:30', harga: 70000 },
+    { bus: createdBuses[4], rute: rutePadangPayakumbuh, tanggal: '2026-11-25', jam: '10:00', harga: 70000 },
+
+    // Padang -> Solok
+    { bus: createdBuses[5], rute: rutePadangSolok, tanggal: '2026-11-16', jam: '07:00', harga: 55000 },
+    { bus: createdBuses[5], rute: rutePadangSolok, tanggal: '2026-11-23', jam: '07:00', harga: 55000 },
+  ];
+
+  let totalKursiCreated = 0;
+  for (const j of daftarJadwal) {
+    const jadwal = await prisma.jadwal.create({
       data: {
-        jadwalId: jadwal1.id,
-        nomorKursi: String(s),
-        status: 'TERSEDIA',
+        busId: j.bus.id,
+        ruteId: j.rute.id,
+        tanggal: j.tanggal,
+        jamBerangkat: j.jam,
+        harga: j.harga,
+        status: 'AKTIF',
       },
     });
+
+    const kursiData = [];
+    for (let s = 1; s <= j.bus.kapasitas; s++) {
+      kursiData.push({
+        jadwalId: jadwal.id,
+        nomorKursi: String(s),
+        status: 'TERSEDIA',
+      });
+      totalKursiCreated++;
+    }
+    await prisma.kursi.createMany({ data: kursiData });
   }
-  console.log(`Berhasil men-seed jadwal dan ${bus1.kapasitas} kursi untuk bus ${bus1.platNomor}.`);
+
+  console.log(`Berhasil men-seed ${daftarJadwal.length} jadwal dan ${totalKursiCreated} kursi di database.`);
 }
 
 main()
